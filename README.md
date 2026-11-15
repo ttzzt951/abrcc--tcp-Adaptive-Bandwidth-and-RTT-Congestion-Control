@@ -1,381 +1,895 @@
 # ABRCC 3.3 — Adaptive Bandwidth and RTT Congestion Control
 
-**Adaptive Bandwidth and RTT Congestion Control Algorithm for Linux TCP**
+**An Adaptive Multi-Mode TCP Congestion Control Algorithm for Linux**
 
-Version: 3.3
-Platform: Linux Kernel
-Type: TCP Congestion Control
-Core Technologies: Brutal, CTCP, CUBIC, Veno, Westwood+, BBR-style bandwidth estimation, and multi-mode control.
+Version: 3.3  
+Platform: Linux Kernel  
+Category: TCP Congestion Control  
+Architecture: Multi-Mode Adaptive Congestion Control
 
 ---
 
-## 1. Project Introduction
+## 1. Introduction
 
-ABRCC (Adaptive Bandwidth and RTT Congestion Control) is an experimental congestion control algorithm designed for Linux TCP.
+ABRCC (Adaptive Bandwidth and RTT Congestion Control) is an experimental TCP congestion control algorithm designed for the Linux kernel.
 
-ABRCC 3.3 employs a multi-mode control architecture. By integrating bandwidth estimation, RTT latency feedback, packet loss classification, dynamic loss compensation, and multi-algorithm candidate probing, it aims to adapt to diverse network environments characterized by varying bandwidth, latency, and packet loss rates.
+Unlike traditional congestion control algorithms that primarily rely on a single control strategy, ABRCC combines multiple congestion control mechanisms and dynamically adjusts its behavior according to network conditions.
 
-Unlike traditional congestion control algorithms that rely on a single strategy, ABRCC incorporates multiple control mechanisms into a unified framework, dynamically adjusting the transmission rate based on current network conditions.
+Its architecture integrates:
 
-Key components include:
+- Brutal-style packet loss compensation
+- CTCP delay-based congestion control
+- CUBIC bandwidth probing
+- Veno-style random loss detection
+- Westwood+ bandwidth estimation
+- BBR-style bandwidth estimation
+- Dynamic congestion compensation
+- RTT and jitter management
+- Multi-connection bandwidth fairness
+- Adaptive rate limiting
+- Special bandwidth probing mechanisms
 
-- Brutal: Packet loss compensation mechanism
-- CTCP: Latency-based window control
-- CUBIC: Rate probing
-- Veno: Random packet loss identification
-- Westwood+: Bandwidth estimation
-- BBR-style: Bandwidth filtering
-- BBRv3-style: Rate upper-bound management
-- Multi-connection fair-share allocation
-- GECKO: Startup burst handling
-- SALAMANDER: Stepped probing
-- HYBRIDIZATION: Low-bandwidth probing
-- CHIMERA: Parallel candidate probing
+The primary objective of ABRCC is to adapt its transmission behavior to different network conditions, including high packet loss, variable RTT, bandwidth fluctuations, and network congestion.
 
-## 2. Three Primary Operating Modes
+## 2. Main Operating Modes
 
-ABRCC 3.3 operates in three main modes:
+ABRCC 3.3 contains three primary operating modes:
 
 1. MODE_CTCP
 2. MODE_BAND
 3. MODE_HYBRID
 
-Mode selection is primarily based on the smoothed packet loss rate, utilizing a hysteresis mechanism to minimize frequent switching between modes. Default Thresholds:
+Mode selection is primarily determined by the smoothed packet loss rate.
 
-| Parameter | Default Value | Purpose |
+Hysteresis thresholds are used to prevent excessive switching between modes.
+
+### Default Mode Selection Thresholds
+
+| Parameter | Default | Meaning |
 |---|---:|---|
-| loss_lo_bp | 30 bp | 0.3%; threshold for entering BAND mode |
-| loss_hi_bp | 100 bp | 1%; threshold for entering HYBRID mode |
-| ext_loss_bp | 3000 bp | 30%; threshold for extreme congestion/packet loss |
+| loss_lo_bp | 30 bp | 0.3% packet loss |
+| loss_hi_bp | 100 bp | 1% packet loss |
+| ext_loss_bp | 3000 bp | 30% extreme loss threshold |
 
-### 2.1 MODE_CTCP
+One basis point (bp) equals 0.01%.
 
-**Trigger Condition: Smoothed packet loss rate is below 0.3%.**
+### 2.1 MODE_CTCP — Low-Loss Mode
 
-This control mode is based on the CTCP (Compound TCP) delay window.
+**Activation condition:** Smoothed packet loss below 0.3%, subject to hysteresis when returning from another mode.
 
-Key Functions:
+MODE_CTCP is the primary delay-based control mode.
 
-- Adjusts the sending rate based on RTT (Round-Trip Time).
-- Explores available bandwidth using the CTCP growth mechanism.
-- Incorporates the CUBIC curve for supplementary probing.
-- Uses the minimum RTT as a delay reference.
-- Adjusts the sending rate based on queueing delay.
-- Does not enable Brutal packet loss compensation.
+Main functions:
 
-Default CTCP Parameters:
+- CTCP congestion window control.
+- RTT-based transmission rate adjustment.
+- CUBIC-assisted bandwidth probing.
+- Minimum RTT tracking.
+- Queue delay monitoring.
+- Adaptive transmission rate growth.
+- Delay-based rate reduction.
 
-- gamma_pkts: 30
-- cwnd_gain: 20 (applied as a factor of 2.0, i.e., divided by 10)
+Default CTCP parameters:
 
-A hysteresis mechanism is employed when returning from other modes to prevent frequent switching caused by fluctuations in the packet loss rate around the 0.3% mark.
+| Parameter | Default |
+|---|---:|
+| gamma_pkts | 30 |
+| cwnd_gain | 20 (10-based scaling) |
 
-### 2.2 MODE_BAND
+Brutal loss compensation is disabled in this mode.
 
-**Trigger Condition: Smoothed packet loss rate reaches 0.3%.**
+### 2.2 MODE_BAND — Bandwidth-Adaptive Mode
 
-Key Functions:
+**Activation condition:** Smoothed packet loss reaches 0.3%.
+
+Main functions:
 
 - Westwood+ bandwidth estimation.
-- Brutal packet loss compensation.
-- CUBIC supplementary probing.
-- Veno-based random packet loss identification.
-- Dynamic sending rate adjustment.
+- Brutal-style packet loss compensation.
+- CUBIC-assisted probing.
+- Veno-style random loss detection.
+- Dynamic transmission rate adjustment.
 - Congestion backoff.
-- Bandwidth upper-limit management.
+- Bandwidth ceiling management.
 
-Standard congestion backoff involves a rate adjustment by a factor of 7/8 (a reduction of approximately 12.5%), typically applied at most once per second.
+The default congestion reduction factor is:
 
-If Veno identifies the packet loss as random, the algorithm can avoid triggering a congestion backoff that would otherwise occur due to standard random packet loss.
+`rate = rate × 7/8`
 
-### 2.3 MODE_HYBRID
+This reduces the transmission rate by approximately 12.5%.
 
-**Trigger Condition: Smoothed packet loss rate reaches 1%.** **
+The default reduction interval is limited to once per second.
 
-This is the hybrid control mode for high packet-loss scenarios in ABRCC.
+When Veno identifies a loss event as likely random rather than congestion-related, ordinary congestion backoff may be avoided.
 
-Key features:
+### 2.3 MODE_HYBRID — High-Loss Hybrid Mode
 
-- Hybrid probing using CTCP and CUBIC.
-- "Brutal" packet-loss compensation.
-- Bandwidth estimation via Westwood+.
+**Activation condition:** Smoothed packet loss reaches 1%.
+
+MODE_HYBRID combines multiple control strategies for more challenging network conditions.
+
+Main functions:
+
+- CTCP and CUBIC hybrid probing.
+- Brutal-style loss compensation.
+- Westwood+ bandwidth estimation.
 - BBR-style bandwidth gain.
-- Dynamic compensation intensity.
-- "HIGH" speed control state.
-- Management of the upper limit for transmission rates.
+- Dynamic compensation strength.
+- HIGH transmission state.
+- Transmission rate ceiling management.
 
-HYBRID incorporates two internal control states:
+MODE_HYBRID contains two internal states:
 
 - ST_CTCP
 - ST_HIGH
 
-ST_CTCP handles probing, while ST_HIGH manages high-speed control using the "Brutal" approach.
+In ST_CTCP, the algorithm continues bandwidth probing.
 
-In the HYBRID ST_CTCP state, the CTCP growth step can be multiplied by 4.
+In ST_HIGH, the algorithm enters its high-speed control state.
 
-Note that this refers to the multiplier for the growth increment, not a direct fourfold increase in the overall transmission rate.
+Under HYBRID conditions, the CTCP growth increment can be multiplied by 4.
+
+This multiplier applies to the growth increment, not the entire transmission rate.
 
 ---
 
-## 3. Brutal: The Core Packet-Loss Compensation Mechanism
+## 3. Brutal — Target-Rate Control and Packet Loss Compensation
 
-"Brutal" is a vital core component of ABRCC 3.3 and a key design element that distinguishes this algorithm from traditional congestion-window growth strategies.
+Brutal is one of the important components of ABRCC 3.3.
 
-It employs a target transmission rate and packet-loss compensation logic, attempting to increase the transmission volume when data loss occurs in order to maintain the expected data delivery rate.
+It introduces a target-rate-based transmission strategy that attempts to compensate for lost packets rather than automatically reducing the target rate after every loss event.
 
-### 3.1 How Brutal Works
+### 3.1 Brutal Operating Principle
 
-Standard TCP congestion control typically reduces the transmission rate following congestion-induced packet loss.
+Traditional congestion control algorithms commonly reduce their transmission rate when congestion-related packet loss occurs.
 
-Brutal, by contrast, takes a different approach:
+Brutal uses a different approach.
 
-When packet loss occurs—and is deemed eligible for compensation—the actual transmission rate is increased based on the packet-loss rate to compensate for the potentially lost data.
+When packet loss occurs, it can increase the actual transmission rate to compensate for the lost data and attempt to maintain the intended effective delivery rate.
 
 For example:
 
-Suppose the base transmission rate is 100 Mbps, with a compensation rate of 10%.
+Assume the target delivery rate is 100 Mbps and the packet loss rate is 10%.
 
-The theoretical transmission rate would then be:
+The theoretical transmission rate required to compensate for the losses is:
 
-100 / (1 - 0.10) = 111.11 Mbps
+`send_rate = 100 / (1 - 0.10)`
 
-This allows the system to maintain an effective delivery target of approximately 100 Mbps, even in the presence of a certain degree of packet loss. ### 3.2 ABRCC Brutal Compensation Calculation
+`send_rate = 111.11 Mbps`
+
+This means the sender attempts to transmit approximately 111.11 Mbps to achieve an effective delivery rate of 100 Mbps, assuming the loss model is representative.
+
+### 3.2 ABRCC Brutal Compensation
 
 ABRCC uses the following parameters:
 
-| Parameter | Default Value | Function |
+| Parameter | Default | Purpose |
 |---|---:|---|
-| max_comp_bp | 5000 | Maximum compensation cap (50%) |
-| comp_pct | 0–100 | Dynamic compensation intensity |
-| loss_s | Dynamically calculated | Smoothed packet loss rate |
+| max_comp_bp | 5000 | Maximum compensation limit: 50% |
+| comp_pct | 0–100 | Dynamic compensation strength |
+| loss_s | Dynamic | Smoothed packet loss rate |
 
-Compensation rate calculation:
+The compensation calculation is:
 
 `comp = min(loss_s, max_comp_bp) × comp_pct / 100`
 
-Actual transmission rate (on the wire):
+The theoretical compensated sending rate is:
 
 `send_rate = base_rate / (1 - comp)`
 
-This is ultimately subject to a hard limit defined by the server's fair-share bandwidth budget, $B$.
+The final rate is still restricted by the server's fair-share bandwidth budget.
 
-### 3.3 Dynamic Compensation Mechanism
+### 3.3 Dynamic Compensation
 
-ABRCC does not always apply compensation at maximum intensity.
+ABRCC does not permanently operate at maximum compensation.
 
-When evidence of congestion is detected:
+When congestion evidence is detected:
 
-- Compensation intensity is halved.
-- The volume of additional data sent is reduced.
-- Priority is given to controlling queue buildup and transmission overload.
+- Compensation strength is reduced by half.
+- Additional transmission is restricted.
+- Queue buildup and transport overload receive priority.
 
-When there is no evidence of congestion:
+When congestion evidence disappears:
 
-- Compensation intensity increases by 10 units per control cycle.
-- It can recover up to a maximum of 100%.
+- Compensation strength increases by 10 per control round.
+- Maximum compensation strength is 100%.
 
-### 3.4 Conditions for Enabling/Disabling Brutal
+### 3.4 Brutal Activation and Deactivation
 
 | Operating Condition | Brutal Compensation |
 |---|---|
 | MODE_CTCP | Disabled |
 | MODE_BAND | Enabled |
 | MODE_HYBRID | Enabled |
-| Extreme Congestion | Disabled |
+| Extreme congestion | Disabled |
 | PROBE_RTT-lite | Disabled |
-| GECKO Startup Phase | Disabled |
+| GECKO startup phase | Disabled |
 
-Brutal is not a mechanism that ignores congestion unconditionally.
+Brutal does not mean unrestricted transmission.
 
-It remains constrained by RTT, delivery rate, the ceiling, the server's bandwidth budget, and safeguards against extreme congestion.
+ABRCC retains RTT monitoring, overload detection, transmission ceilings, fair-share limits, and extreme congestion protection.
 
 ---
 
 ## 4. Internal Control States
 
-### 4.1 ST_CTCP
+ABRCC has two internal control states.
 
-The base probing state.
+### 4.1 ST_CTCP — Standard Probing State
 
-Responsible for:
+This is the primary bandwidth exploration state.
+
+Responsibilities:
 
 - CTCP delay-based window control.
-- CUBIC-style auxiliary growth.
-- Network bandwidth probing.
-- Monitoring RTT variations. - Determine whether the conditions for entering the HIGH state are met.
+- CUBIC-assisted growth.
+- Available bandwidth probing.
+- RTT monitoring.
+- Determining whether the connection can enter HIGH.
 
-### 4.2 ST_HIGH
+### 4.2 ST_HIGH — High-Speed Control State
 
-A high-speed control state following the "Brutal" approach.
+ST_HIGH is the high-speed control state associated with Brutal-style target-rate management.
 
-Entry conditions:
+Activation conditions:
 
-1. The current primary mode is MODE_HYBRID.
-2. The CTCP detection rate has reached the H threshold.
-3. The backoff wait period has elapsed.
-4. There is no extreme congestion.
+1. The primary mode is MODE_HYBRID.
+2. The current rate reaches the H threshold.
+3. The backoff waiting period has expired.
+4. No extreme congestion condition is active.
 
-The default H threshold is calculated based on the fair-share bandwidth ($B$) and the `hold_drop_mbps` parameter.
+The default H threshold is calculated using the fair-share bandwidth budget B and the hold_drop_mbps parameter.
 
-The default value for `hold_drop_mbps` is 50 Mbps.
+The default hold_drop_mbps value is 50 Mbps.
 
-Primary functions of ST_HIGH:
+Main functions:
 
-- Drive the sending rate toward the compensated fair-share target.
-- Maintain rate control based on the "Brutal" approach.
-- Limit the rate using a "learned ceiling."
-- Monitor for transmission overload.
-- Fall back to the ST_CTCP state based on network conditions.
+- Move the transmission rate toward the compensated fair-share target.
+- Maintain Brutal-style target-rate control.
+- Apply learned transmission ceilings.
+- Monitor transport overload.
+- Return to ST_CTCP when necessary.
 
-If three consecutive anomalous control rounds occur while in the HIGH state, the rate is reduced, and the system reverts to the ST_CTCP state.
+If three consecutive control rounds are classified as abnormal, the algorithm reduces the rate and exits HIGH.
 
 ---
 
 ## 5. Four Special Mechanisms
 
-### 5.1 GECKO: Startup Burst Probing
+ABRCC 3.3 includes four distinctive special mechanisms:
 
-Enabled by default.
+1. GECKO
+2. SALAMANDER
+3. HYBRIDIZATION
+4. CHIMERA
 
-Trigger condition: The startup phase following the completion of the TCP handshake.
+These are special probing and control mechanisms, not additional primary operating modes.
 
-Default duration: 5 seconds.
+### 5.1 GECKO — Startup Burst Probing
 
-Mechanism:
+Default: Enabled.
 
-- Utilize the full fair-share budget during the startup phase.
-- Temporarily ignore packet-loss feedback.
-- Record the best delivery rate achieved during the startup phase.
-- Upon conclusion of the startup phase, adjust the rate to half of the best delivery rate recorded.
+Activation:
 
-The default minimum rate following the startup phase is 8 Mbps; however, this value cannot be lower than the best delivery rate actually achieved, and it remains subject to the fair-share limit.
+- During the initial TCP connection startup phase.
 
-Subsequently, the packet-loss and queue history accumulated during the startup phase are cleared.
+Default duration:
 
-### 5.2 SALAMANDER: Stepped Bandwidth Sprint
+- 5 seconds.
 
-Enabled by default (requires `sal_on=1`). Select the target for the next phase based on the best historical delivery rate:
+Operating procedure:
 
-| Best Historical Delivery Rate | Next Target |
+1. Use the available fair-share bandwidth budget during startup.
+2. Temporarily ignore ordinary packet loss feedback.
+3. Record the highest delivery rate observed during startup.
+4. Adjust the transmission rate after the startup phase.
+5. Return to normal CTCP control.
+
+The default post-startup rate is:
+
+`rate = max(peak / 2, 8 Mbps)`
+
+The actual rate is subject to the fair-share limit and the condition that it must not be reduced below the best delivery rate already achieved when the startup peak is below 8 Mbps.
+
+GECKO also clears startup packet loss and queue history to prevent startup behavior from contaminating subsequent control decisions.
+
+### 5.2 SALAMANDER — Staircase Bandwidth Acceleration
+
+Default: Enabled through sal_on=1.
+
+SALAMANDER uses the historical maximum delivery rate to determine the next bandwidth probing target.
+
+Default bandwidth stages:
+
+| Historical Best Delivery Rate | Next Target |
 |---|---:|
-| Below 30 Mbps | Handled via HYBRIDIZATION |
+| Below 30 Mbps | Use HYBRIDIZATION |
 | 30–50 Mbps | 50 Mbps |
 | 50–100 Mbps | 100 Mbps |
 | 100–150 Mbps | 150 Mbps |
 | 150–200 Mbps | 200 Mbps |
-| Reached 200 Mbps | Default progression completed |
+| 200 Mbps reached | Complete default staircase |
 
-Probing Conditions:
+#### Activation Conditions
 
-- Currently in the ST_CTCP state.
+- Current internal state is ST_CTCP.
 - Current primary mode is MODE_CTCP.
-- RTT meets the requirements.
-- No extreme congestion.
-- No transmission overload.
-- Current target has not been reached for at least 10 minutes.
-- An interval of 6–7 minutes has elapsed since the last probe.
+- RTT is within the permitted range.
+- No extreme congestion is present.
+- No transport overload is detected.
+- Sufficient bandwidth growth headroom exists.
+- The current target has not been reached for at least 10 minutes.
+- The previous probing interval has expired.
 
-The default probe duration is 30 seconds, with a 6-second linear growth phase.
+#### Default Parameters
 
-Up to three probe attempts are permitted for each target.
+| Parameter | Default |
+|---|---:|
+| sal_idle_s | 600 seconds |
+| sal_gap_min_s | 360 seconds |
+| sal_gap_max_s | 420 seconds |
+| sal_dur_s | 30 seconds |
+| sal_ramp_s | 6 seconds |
+| sal_tries | 3 |
+| sal_reach_pct | 95% |
 
-Upon failure:
+#### Probing Procedure
 
-- Revert to the rate prior to the probe.
-- Impose a ceiling limit.
-- Enter a cooldown period (randomized between 150–210 seconds).
-- Log the probe result.
+- Increase the transmission rate linearly toward the target.
+- Combine CTCP, CUBIC, Westwood+, and BBR-style candidate rates.
+- Limit candidate growth to a maximum of 2 times per control round.
+- Respect the target bandwidth and fair-share limits.
 
-Success is defined as achieving a delivery rate of at least 95% of the target, sustained for a minimum of 1 second.
+#### Failure Conditions
 
-### 5.3 HYBRIDIZATION: Low-Bandwidth Hybrid Probing
+1. Smoothed packet loss increases by at least 2 percentage points compared with the probing baseline.
+2. Extreme congestion is detected.
+3. The connection enters HIGH.
+4. Queue delay reaches the minimum of 10 ms or 50% of the base RTT.
+5. Transport overload is detected.
 
-Controlled by `sal_on` by default.
+The abnormal condition must persist for approximately two RTTs and at least 200 ms before probing is considered unsuccessful.
 
-Trigger Conditions:
+#### Failure Recovery
 
-- Best historical delivery rate is below 30 Mbps.
-- Currently in the ST_CTCP state.
-- No extreme congestion.
-- No transmission overload.
-- Probe interval requirement is met.
+- Restore the pre-probing transmission rate.
+- Apply a transmission ceiling.
+- Enter a randomized cooldown period of 150–210 seconds.
+- Record the probing result.
 
-Default Parameters:
+#### Success Condition
 
-- Probe interval: 360 seconds.
-- Probe duration: 20 seconds.
-- Maximum number of probe attempts: 3.
-- Maximum probe target: 50 Mbps.
+The delivery rate reaches at least 95% of the target and remains there for at least one second.
 
-Operational Mechanism:
+SALAMANDER retains up to three probing records, including:
 
-- Multiply the CTCP growth step by 4.
-- Suspend standard packet-loss-based backoff.
-- Simultaneously incorporate CUBIC as a candidate. - Added Westwood+ bandwidth estimation.
-- Added a BBR-style bandwidth gain candidate.
-- Selects the maximum candidate rate.
+- Start time.
+- Duration.
+- Initial rate.
+- Target rate.
+- Peak rate.
+- Packet loss.
+- Queue delay.
 
-Failure conditions are primarily defined by severe queue latency or transmission overload, rather than just an increase in packet loss.
+### 5.3 HYBRIDIZATION — Low-Bandwidth Hybrid Probing
 
-### 5.4 CHIMERA: Multi-Algorithm Parallel Candidate Mechanism
+Default: Controlled by sal_on.
 
-Disabled by default:
+HYBRIDIZATION is designed for connections whose historical best delivery rate is below 30 Mbps.
+
+#### Activation Conditions
+
+- Historical best delivery rate is below 30 Mbps.
+- Internal state is ST_CTCP.
+- The connection is actively transmitting.
+- PROBE_RTT is not active.
+- Extreme congestion is absent.
+- Transport overload is absent.
+- Sufficient growth headroom exists.
+- The minimum probing interval has elapsed.
+
+#### Default Parameters
+
+| Parameter | Default |
+|---|---:|
+| sal_off_mbps | 30 Mbps |
+| sal_hyb_gap_s | 360 seconds |
+| sal_hyb_s | 20 seconds |
+| sal_hyb_tries | 3 |
+| Maximum probing target | 50 Mbps |
+
+#### Operating Procedure
+
+1. Multiply the CTCP growth increment by 4.
+2. Temporarily suspend ordinary packet loss backoff.
+3. Include CUBIC as a candidate.
+4. Include Westwood+ bandwidth estimation.
+5. Include BBR-style bandwidth gain candidates.
+6. Select the highest eligible candidate rate.
+
+Unlike SALAMANDER, HYBRIDIZATION does not use the same requirement that the primary mode must be MODE_CTCP.
+
+It is designed to explore additional bandwidth under low-bandwidth conditions.
+
+#### Failure Conditions
+
+- Severe queue delay.
+- Transport overload.
+- Extreme congestion.
+
+After failure, the transmission rate returns to its pre-probing value.
+
+Unlike SALAMANDER, a simple increase in packet loss does not automatically cause failure.
+
+Each probing attempt lasts up to 20 seconds. A maximum of three attempts is permitted.
+
+### 5.4 CHIMERA — Multi-Algorithm Parallel Candidate Mechanism
+
+Default:
 
 `chimera=0`
 
-Enabled:
+CHIMERA is disabled by default and must be explicitly enabled.
+
+Enable:
 
 `chimera=1`
 
-Trigger conditions:
+#### Activation Conditions
 
-- Peak packet loss rate reaches the default threshold of 10%.
-- Veno identifies the loss as random (with `rand_pct` reaching 60).
-- No evidence of congestion exists.
-- The system is not in a state of extreme congestion.
-- These conditions persist for at least 16 control rounds.
+- Peak packet loss reaches 10%.
+- Veno random-loss classification reaches 60%.
+- No congestion evidence is present.
+- No extreme congestion condition is active.
+- Conditions persist for at least 16 control rounds.
 
-Participating candidate mechanisms:
+#### Participating Candidates
 
 - CTCP
 - CUBIC
 - Westwood+
 - BBR-style bandwidth gain
 
-The algorithm calculates multiple candidate rates simultaneously and selects the highest value.
+CHIMERA calculates multiple candidate transmission rates and selects the highest eligible candidate.
 
-CHIMERA operates on an eight-round cycle:
+#### Eight-Round Cycle
 
-- Round 0: BBR-style probing, with a gain of 1.25.
-- Round 1: DRAIN phase, with the rate limited to 0.75x the estimated bandwidth.
-- Other rounds: Standard candidate cruising.
+| Cycle Stage | Behavior |
+|---|---|
+| Round 0 | BBR-style probing with a gain of 1.25 |
+| Round 1 | BBR-style DRAIN, limited to 0.75 times estimated bandwidth |
+| Remaining rounds | Normal candidate cruising with gain 1.0 |
 
-Candidate growth remains subject to per-round growth limits, a ceiling, overload detection, and server budget constraints.
+Candidate growth remains subject to:
 
-3.3 Fixed an issue where the DRAIN phase failed to effectively reduce the rate, ensuring the 0.75x bandwidth limit is actually applied.
+- Maximum per-round growth.
+- Learned transmission ceilings.
+- Overload detection.
+- Server bandwidth budgets.
+
+#### Version 3.3 Improvement
+
+ABRCC 3.3 fixes an important CHIMERA DRAIN implementation issue.
+
+Previously, the DRAIN stage used maximum-value comparison, preventing the 0.75 bandwidth limit from actually reducing the transmission rate.
+
+Version 3.3 changes this behavior so that the DRAIN stage can genuinely reduce the rate.
 
 ---
 
-## 6. Packet Loss Identification and the Veno Mechanism
+## 6. Packet Loss Detection and Classification
 
-ABRCC does not automatically classify all packet loss as congestion.
+ABRCC does not automatically treat every packet loss event as network congestion.
 
-It attempts to distinguish between:
+It attempts to distinguish:
 
 - Random packet loss.
 - Congestion-related packet loss.
 - Extreme congestion.
 
-Packet loss statistics require a minimum of 100 samples by default.
+### 6.1 Packet Loss Statistics
 
-The smoothed packet loss rate is calculated as:
+The algorithm calculates packet loss using ACK and lost-packet statistics.
+
+A minimum of 100 ACK/loss samples is required before a valid instantaneous loss estimate is generated.
+
+Full-window losses during RTO are excluded from ordinary loss statistics.
+
+The smoothed loss rate is calculated as:
 
 `loss_s = (old_loss_s × 3 + instant_loss) / 4`
 
-Loss of an entire window during an RTO (Retransmission Timeout) event is not factored into standard packet loss statistics. ### Veno Style Determination
+ABRCC also maintains a decaying peak-loss measurement called loss_pk.
 
-`rand_pct` represents the tendency for random packet loss:
+### 6.2 Veno-Style Random Loss Classification
 
-| rand_pct | Determination |
+Veno classification is updated when CUBIC participates.
+
+It considers:
+
+- RTT queue delay.
+- Queue backlog in packets.
+- Actual delivery rate.
+- Expected delivery rate.
+- RTT jitter.
+
+Default parameters:
+
+| Parameter | Default |
+|---|---:|
+| veno_beta | 3 packets |
+| veno_pct | 8% of base RTT |
+| Minimum queue tolerance | 2 ms |
+| Low delivery threshold | 85% of expected rate |
+
+The rand_pct classification value is interpreted as follows:
+
+| rand_pct | Interpretation |
 |---|---|
-| 60–1 | |
+| 60–100 | More likely random loss |
+| 40–60 | Uncertain classification |
+| 0–40 | More likely congestion-related loss |
+
+Random loss can avoid ordinary congestion backoff, whereas congestion-related loss triggers rate reduction.
+
+### 6.3 Extreme Congestion Detection
+
+Default threshold:
+
+`ext_loss_bp = 3000`
+
+This corresponds to 30% packet loss.
+
+However, reaching 30% loss alone does not immediately activate extreme congestion protection.
+
+The following conditions must also be satisfied:
+
+- Smoothed packet loss reaches 30%.
+- RTT queue congestion or transport overload evidence exists.
+- The extreme condition persists for at least two control rounds.
+
+When activated:
+
+- Brutal compensation is disabled.
+- Transmission rate is restricted.
+- Probing mechanisms are limited.
+- HIGH state is exited.
+- Normal congestion control takes priority.
+
+---
+
+## 7. CUBIC and Westwood+ Integration
+
+CUBIC is enabled by default.
+
+Default parameters:
+
+| Parameter | Default |
+|---|---:|
+| cubic_on | 1 |
+| cub_loss_bp | 20 bp |
+| cub_beta | 70% |
+
+CUBIC can participate in CTCP probing when smoothed packet loss reaches 0.2%.
+
+Its growth curve is used to generate candidate transmission rates.
+
+### Westwood+ Bandwidth Estimation
+
+Westwood+ estimates available bandwidth based on the amount of data delivered during each control round.
+
+A 7/8 low-pass filter is used.
+
+When congestion-related loss occurs:
+
+1. Record the actual transmission rate.
+2. Update the transmission ceiling.
+3. Estimate available bandwidth using Westwood+.
+4. Restrict the new rate to approximately 70–87.5% of the previous rate.
+5. Restart the CUBIC epoch.
+6. Prevent immediate ceiling recovery during the same control round.
+
+This ordering is an important part of the 3.3 implementation.
+
+---
+
+## 8. BBR-Style Bandwidth Estimation and RTT Management
+
+ABRCC maintains multiple bandwidth references.
+
+These include:
+
+- Maximum delivery rate over the most recent 10 control rounds.
+- Delivery Rate EWMA.
+- Westwood+ bandwidth estimation.
+- BBR-style bandwidth gain candidates.
+
+### 8.1 BBR-Style Bandwidth Filter
+
+The algorithm uses the maximum observed delivery rate over a rolling window of 10 control rounds as a bandwidth reference.
+
+### 8.2 Delivery Rate EWMA
+
+Delivery-rate samples are smoothed using an EWMA with a 1/8 update weight.
+
+### 8.3 PROBE_RTT-lite
+
+Default minimum RTT refresh interval:
+
+10 seconds.
+
+Default probing duration:
+
+200 ms.
+
+Functions:
+
+- Temporarily reduce transmission rate.
+- Drain the queue.
+- Update the minimum RTT reference.
+- Restore normal control.
+
+If SALAMANDER or HYBRIDIZATION is active, the probing mechanism gives priority to the ongoing special probing process.
+
+### 8.4 High Jitter Handling
+
+Default jitter threshold:
+
+`max(base_rtt × 30%, 10 ms)`
+
+When high jitter persists for three control rounds, the algorithm uses the minimum RTT sample from the current round instead of ordinary SRTT as its delay signal.
+
+This helps reduce the influence of temporary RTT fluctuations.
+
+---
+
+## 9. Congestion Reduction and Recovery Mechanisms
+
+ABRCC includes several independent rate reduction mechanisms.
+
+| Mechanism | Default Behavior |
+|---|---|
+| CTCP RTT reduction | Reduces rate according to queue delay |
+| BAND backoff | Multiplies rate by 7/8 |
+| Westwood+ reduction | Adjusts rate using estimated bandwidth |
+| CUBIC response | Updates epoch and reduces candidate rate |
+| HIGH fallback | Exits HIGH after three abnormal rounds |
+| Exponential backoff | Increases waiting time after failures |
+| Extreme congestion protection | Disables compensation and restricts rate |
+| Ceiling management | Maintains a learned safe rate limit |
+| Automatic minimum rate | Dynamically adjusts the minimum rate |
+
+### 9.1 Time-Based Backoff
+
+Default parameters:
+
+| Parameter | Default |
+|---|---:|
+| hold_rounds | 8 |
+| hold_min_ms | 200 ms |
+| hold_max_s | 30 seconds |
+| reprobe_s | 20 seconds |
+| reprobe_rounds | 8 |
+
+As the number of failures increases, the waiting period becomes longer.
+
+This prevents excessive repeated probing.
+
+After at least 64 healthy control rounds and a minimum of five seconds of stable operation, the failure counter can gradually recover.
+
+### 9.2 Congestion Capacity Learning
+
+If three consecutive control rounds detect transport overload, the transmission rate is restricted to approximately 125% of the measured delivery rate.
+
+If six consecutive rounds show that delivery rate is below 90% of sending rate, the algorithm may classify the path as having reached its practical capacity.
+
+It then establishes a rate ceiling using the rolling maximum bandwidth estimate.
+
+The ceiling recovers gradually under normal conditions.
+
+It does not immediately increase during the same round in which congestion-related rate reduction occurs.
+
+---
+
+## 10. Global Fair-Share Bandwidth Management
+
+ABRCC supports module-level bandwidth sharing across multiple TCP connections.
+
+Default parameters:
+
+| Parameter | Default |
+|---|---:|
+| target_mbps | 200 |
+| fair_share | 1 |
+| fair_idle_ms | 2000 |
+
+Main functions:
+
+1. Track active connections.
+2. Allocate the server's total bandwidth budget.
+3. Identify connections limited by their own network paths.
+4. Reallocate unused bandwidth to other connections.
+5. Prevent the sum of minimum connection rates from exceeding the server budget.
+
+Version 3.3 also fixes a minimum-rate allocation issue that could allow the combined minimum rates to exceed the total server budget.
+
+---
+
+## 11. Dynamic Minimum Transmission Rate
+
+ABRCC supports both automatic and manually configured minimum transmission rates.
+
+Default parameters:
+
+| Parameter | Default |
+|---|---:|
+| min_mbps | 0 |
+| min_relax | 0 |
+| Internal minimum rate | 0.5 Mbps |
+| Manual minimum-rate aggregate limit | 15 Mbps |
+
+The minimum transmission rate is restricted by the fair-share budget.
+
+During persistent overload, the automatic minimum rate can gradually decrease.
+
+When the network recovers, it can gradually increase again.
+
+---
+
+## 12. Complete Default Parameter Reference
+
+| Parameter | Default | Function |
+|---|---:|---|
+| target_mbps | 200 | Server bandwidth budget |
+| loss_lo_bp | 30 | MODE_BAND threshold |
+| loss_hi_bp | 100 | MODE_HYBRID threshold |
+| ext_loss_bp | 3000 | Extreme loss threshold |
+| cub_loss_bp | 20 | CUBIC participation threshold |
+| max_comp_bp | 5000 | Maximum compensation |
+| fair_share | 1 | Enable fair-share allocation |
+| gecko_on | 1 | Enable GECKO |
+| gecko_s | 5 | GECKO startup duration |
+| gecko_min_mbps | 8 | GECKO minimum startup target |
+| sal_on | 1 | Enable SALAMANDER and HYBRIDIZATION |
+| sal_goal_mbps | 200 | Maximum staircase target |
+| sal_off_mbps | 30 | Low-bandwidth threshold |
+| sal_dur_s | 30 | SALAMANDER duration |
+| sal_ramp_s | 6 | SALAMANDER ramp duration |
+| sal_tries | 3 | Maximum attempts per stage |
+| sal_reach_pct | 95% | Successful target threshold |
+| sal_loss_bp | 200 | Loss increase failure threshold |
+| sal_cool_min_s | 150 | Minimum failure cooldown |
+| sal_cool_max_s | 210 | Maximum failure cooldown |
+| sal_hyb_gap_s | 360 | HYBRIDIZATION interval |
+| sal_hyb_s | 20 | HYBRIDIZATION duration |
+| sal_hyb_tries | 3 | Maximum HYBRIDIZATION attempts |
+| chimera | 0 | CHIMERA disabled by default |
+| chimera_loss_bp | 1000 | CHIMERA peak-loss threshold |
+| chimera_rounds | 16 | CHIMERA activation persistence |
+
+---
+
+## 13. Version 3.3 — Changes and Improvements
+
+ABRCC 3.3 introduces additional probing mechanisms and fixes several important implementation issues.
+
+### New Mechanisms
+
+1. **GECKO:** Five-second startup burst probing.
+2. **SALAMANDER:** Multi-stage staircase bandwidth acceleration.
+3. **HYBRIDIZATION:** Hybrid probing for connections below 30 Mbps.
+4. **Probing history:** Records probing duration, targets, peak rates, packet loss, and queue delay.
+5. **Failure recovery:** Probing rollback and cooldown mechanisms.
+
+### Important Fixes and Optimizations
+
+1. CHIMERA BBR-style DRAIN now genuinely reduces the transmission rate.
+2. CUBIC congestion event calculation order has been corrected.
+3. Ceiling, Westwood+ reduction, and CUBIC epoch calculations use the actual transmission rate.
+4. Multi-connection minimum-rate allocation no longer exceeds the server bandwidth budget.
+5. Fixed u32 overflow issues under high bandwidth conditions.
+6. Important rate variables use u64 to improve large-rate calculations.
+7. Improved CWND calculations for high-bandwidth and high-RTT environments.
+
+---
+
+## 14. Deployment Requirements
+
+ABRCC 3.3 is a Linux kernel TCP congestion control module.
+
+Requirements:
+
+- Installation on the TCP sending endpoint.
+- A Linux kernel supporting the required TCP congestion control interfaces.
+- fq qdisc or an environment with appropriate internal pacing support.
+- Correct server bandwidth budget configuration.
+
+Example configuration:
+
+```bash
+modprobe tcp_abrcc target_mbps=200 min_mbps=5
+
+sysctl -w net.core.default_qdisc=fq
+
+sysctl -w net.ipv4.tcp_congestion_control=abrcc
+```
+
+Module parameters can be inspected through:
+
+```bash
+/sys/module/tcp_abrcc/parameters/
+```
+
+---
+
+## 15. Testing and Research Directions
+
+ABRCC 3.3 contains multiple interacting mechanisms. Its performance and stability should be evaluated through reproducible experiments.
+
+Recommended testing areas:
+
+- Throughput under different RTT conditions.
+- Packet loss from 0.1% to 30%.
+- Random-loss versus congestion-loss classification accuracy.
+- Multi-connection fairness.
+- Stability under high jitter.
+- Brutal compensation effectiveness.
+- GECKO startup burst behavior.
+- SALAMANDER probing success rate.
+- HYBRIDIZATION low-bandwidth performance.
+- CHIMERA behavior under random packet loss.
+- Comparisons against Linux CUBIC, BBR, and Reno.
+- Long-duration stability and congestion recovery.
+
+Performance claims should be supported by measured experimental results rather than inferred from algorithm design.
+
+---
+
+## 16. Architecture Summary
+
+ABRCC 3.3 consists of three primary operating modes, two internal control states, multiple integrated congestion control mechanisms, and four special probing mechanisms.
+
+### Three Primary Operating Modes
+
+- MODE_CTCP
+- MODE_BAND
+- MODE_HYBRID
+
+### Two Internal Control States
+
+- ST_CTCP
+- ST_HIGH
+
+### Core Algorithms and Control Mechanisms
+
+- Brutal
+- CTCP
+- CUBIC
+- Veno
+- Westwood+
+- BBR-style bandwidth estimation
+- BBRv3-style ceiling management
+
+### Four Special Mechanisms
+
+- GECKO
+- SALAMANDER
+- HYBRIDIZATION
+- CHIMERA
+
+### Auxiliary Systems
+
+- Dynamic packet loss compensation
+- RTT management
+- Extreme congestion protection
+- Time-based backoff
+- Congestion capacity learning
+- Fair-share bandwidth allocation
+- Dynamic minimum transmission rate
+- Transmission ceiling management
+
+ABRCC's central design philosophy is to avoid treating every network condition identically.
+
+Instead, it dynamically adjusts transmission behavior according to bandwidth availability, RTT, packet loss, queue conditions, and congestion evidence.
+
+**ABRCC — Adaptive Bandwidth and RTT Congestion Control.**
