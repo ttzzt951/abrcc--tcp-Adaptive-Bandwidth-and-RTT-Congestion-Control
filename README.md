@@ -1,163 +1,353 @@
-# ABRCC 3.3: A Linux TCP Congestion Control Algorithm for Adaptive Bandwidth and RTT Control
+# ABRCC 3.3 Full Technical Specification: Multi-Mode Adaptive TCP Congestion Control Algorithm
 
 **ABRCC — Adaptive Bandwidth and RTT Congestion Control**
 
 Version: 3.3
-Project Type: Linux TCP Congestion Control
-Focus: Adaptive bandwidth, RTT management, and hybrid multi-algorithm control
+Platform: Linux Kernel
+Type: TCP Congestion Control
+Core Design: Multi-mode control, dynamic bandwidth probing, packet loss classification, congestion compensation, and RTT adaptation.
 
-## 1. Project Overview
+---
 
-ABRCC (Adaptive Bandwidth and RTT Congestion Control) is an experimental congestion control algorithm designed for Linux TCP.
+## 1. Project Introduction
 
-Its objective is to achieve adaptive control across diverse network environments by leveraging bandwidth estimation, RTT feedback, congestion state identification, and a combination of multiple algorithms.
+ABRCC 3.3 is an experimental adaptive congestion control algorithm designed for the Linux TCP stack.
 
-Unlike traditional approaches that rely on a single congestion control strategy, ABRCC 3.3 employs a multi-mode architecture and incorporates specialized probing mechanisms, allowing the algorithm to apply distinct control strategies based on varying bandwidth conditions and network states.
+Unlike traditional, monolithic congestion control algorithms, ABRCC employs three primary operating modes. It dynamically adjusts its control strategy based on metrics such as packet loss rate, RTT, bandwidth estimation, and the degree of network congestion.
 
-Rather than being confined to a single method for congestion window growth, ABRCC integrates the characteristics of various congestion control algorithms to establish a more flexible control framework.
+It integrates concepts from various existing algorithms—including CTCP, CUBIC, Veno, Westwood+, and BBR—while incorporating specialized mechanisms such as GECKO, SALAMANDER, HYBRIDIZATION, and CHIMERA.
+
+The design objectives of ABRCC 3.3 include:
+
+- Adapting to network environments with varying bandwidths.
+- Adjusting transmission strategies based on packet loss conditions.
+- Distinguishing between random packet loss and congestion-induced packet loss.
+- Proactively probing for available bandwidth when network conditions permit.
+- Implementing rate reduction and back-off during periods of congestion.
+- Limiting total bandwidth usage across multiple connections via a fair-share mechanism.
+- Adapting to RTT fluctuations and high-jitter network environments.
 
 ## 2. Three Primary Operating Modes
 
-ABRCC 3.3 features three main operating modes.
+ABRCC 3.3 features three primary operating modes:
 
-### 2.1 MODE_CTCP
+1. MODE_CTCP
+2. MODE_BAND
+3. MODE_HYBRID
 
-MODE_CTCP is not merely a simple implementation of CTCP; rather, it functions as a hybrid mode that combines multiple algorithms.
+These modes are not entirely independent algorithms; rather, they are selected automatically by a unified control framework based on the smoothed packet loss rate. The default packet loss thresholds are as follows:
 
-Its design incorporates:
+| Parameter | Default Value | Percentage |
+|---|---:|---:|
+| loss_lo_bp | 30 bp | 0.3% |
+| loss_hi_bp | 100 bp | 1% |
+| ext_loss_bp | 3000 bp | 30% |
 
-- CTCP
-- CUBIC
-- Veno
-- Westwood+
-- BBR-style bandwidth filtering and rate referencing
-- A "ceiling" (upper limit) constraint mechanism
+Here, "bp" stands for "basis points," where 100 bp equals 1%.
 
-This mode aims to balance bandwidth growth, congestion detection, and transmission rate limiting by synthesizing the control characteristics of these various algorithms.
+### 2.1 MODE_CTCP: Low Packet Loss Control Mode
 
-### 2.2 MODE_BAND
+**Trigger Conditions:**
 
-MODE_BAND is an operating mode centered on bandwidth estimation and adaptive control.
+- The smoothed packet loss rate is below 0.3%.
+- If the system was previously in the BAND or HYBRID state, a hysteresis mechanism is applied to prevent an premature switch back to CTCP.
 
-It focuses primarily on the network's available bandwidth, addressing fluctuations in bandwidth, rate adjustments, and the management of transmission upper limits.
+The default reference threshold for returning to CTCP from other modes is a packet loss rate below 0.21%.
 
-The goal of this mode is to dynamically adjust transmission behavior based on current network conditions, moving away from a reliance on a static, fixed growth strategy. ### 2.3 MODE_HYBRID
+Key Functions:
 
-MODE_HYBRID is a hybrid operating mode that encompasses two internal control states:
+- CTCP delay-based window control.
+- Adjustment of the sending rate based on RTT growth.
+- Rate increases or decreases based on network latency feedback.
+- Allows CUBIC to participate in probing under applicable conditions.
+- Does not employ "Brutal"-style packet loss compensation.
 
-- ST_CTCP
-- ST_HIGH
+CTCP uses the `gamma` parameter to control the delay-based window; the default value for `gamma` is 30 packets.
 
-This mode dynamically switches between these control states based on network conditions, allowing the algorithm to balance the requirements for standard control with those for higher transmission rates.
+When latency feedback remains within an acceptable range, the algorithm increases the rate; when the RTT signal is significantly higher than the baseline (minimum RTT), the rate is reduced proportionally to the RTT.
 
-## 3. Four Special Mechanisms
+### 2.2 MODE_BAND: Bandwidth-Adaptive Mode
+
+**Trigger Conditions:**
+
+- The smoothed packet loss rate reaches 0.3%.
+- The conditions for entering the HYBRID mode have not yet been met.
+- If the system was previously in a mode other than CTCP, a hysteresis reference value of 0.21% applies for exiting this mode.
+
+Key Functions:
+
+- Bandwidth estimation and dynamic rate adjustment.
+- Westwood+ bandwidth estimation.
+- Packet loss compensation.
+- Dynamic control of the compensation intensity.
+- Coordinated control using both CUBIC and Veno.
+- Rate reduction during congestion. Default Back-off Mechanism:
+
+When a standard back-off is required, the sending rate is adjusted as follows:
+
+`rate = rate × 7/8`
+
+This results in a reduction of approximately 12.5% ​​per occurrence, with a default limit of at most one such adjustment per second.
+
+If Veno identifies a packet loss as random (non-congestion-related), no congestion back-off is triggered.
+
+### 2.3 MODE_HYBRID: High-Loss Hybrid Mode
+
+**Trigger Conditions:**
+
+- The smoothed packet loss rate exceeds 1%.
+- If already in the HYBRID state, a hysteresis threshold of 0.7% applies.
+
+Key Functions:
+
+- Enhanced CTCP growth step.
+- Multi-algorithm participation in control.
+- "Brutal"-style rate control.
+- Dynamic packet loss compensation.
+- Management of the upper limit for the sending rate.
+- High-speed state switching.
+
+When in the internal CTCP state, the HYBRID mode multiplies the CTCP growth step by 4.
+
+Note that this does not mean the final sending rate is multiplied by 4; rather, it is the growth increment that is scaled.
+
+When the criteria for entering the HIGH state are met, the algorithm switches to `ST_HIGH`.
+
+---
+
+## 3. Internal Control States
+
+ABRCC utilizes two additional internal control states.
+
+### 3.1 ST_CTCP
+
+This is the fundamental probing state.
+
+Primary responsibilities include:
+
+- Probing for available bandwidth.
+- Adjusting the sending rate based on RTT.
+- Executing CTCP growth.
+- Incorporating CUBIC when applicable.
+- Evaluating whether the conditions for entering the HIGH state are met.
+
+### 3.2 ST_HIGH
+
+This is a "Brutal"-style high-speed control state.
+
+Entry requires that all of the following conditions are met:
+
+1. The current primary mode is `MODE_HYBRID`.
+2. The current rate has reached the `H` threshold.
+3. The back-off wait period has elapsed.
+4. The system is not in a state of extreme congestion.
+
+The default calculation for `H` is:
+
+`H = B × (target - 50) / target`
+
+Where `B` represents the upper limit of the connection's fair share of bandwidth. For example, when the server's target bandwidth is 200 Mbps, the "H" (HIGH) state defaults to 75% of the current fair share.
+
+Key functions of ST_HIGH:
+
+- Adjusts the sending rate toward the fair-share target.
+- Limits the rate using a learned "ceiling."
+- Performs dynamic packet-loss compensation.
+- Monitors RTT and transmission overload.
+- Falls back to ST_CTCP based on network conditions.
+
+If three consecutive control rounds are deemed anomalous, the rate is reduced to 7/8 of its current value, and the algorithm reverts to CTCP.
+
+If a failure occurs while in the HIGH state, the backoff wait time increases incrementally, up to a default maximum of 30 seconds.
+
+---
+
+## 4. Four Special Mechanisms
 
 The most distinctive design elements of ABRCC 3.3 are its four special mechanisms:
 
-GECKO, SALAMANDER, HYBRIDIZATION, and CHIMERA.
-
-Rather than serving as additional primary operating modes, these function as specialized probing or control mechanisms tailored for specific network conditions.
-
-### 3.1 GECKO: Rapid-Start Probing
-
-GECKO is designed primarily for bandwidth discovery during the initial phase of a connection.
-
-It incorporates an initial burst phase lasting approximately 5 seconds, intended to rapidly explore available bandwidth as soon as a connection is established.
-
-Unlike approaches that maintain high-speed transmission continuously, GECKO also manages the transition to subsequent control states once the initial phase concludes, preventing excessive, prolonged probing.
-
-### 3.2 SALAMANDER: Stepped-Sprint
-
-SALAMANDER employs a "stepped-sprint" strategy—a method for increasing transmission speed in stages.
-
-Instead of jumping directly to a target transmission rate, it explores network capacity by incrementally raising the rate in distinct steps.
-
-This design is intended to mitigate the risk of congestion that could arise from a sudden, large-scale increase in transmission speed.
-
-### 3.3 HYBRIDIZATION: Low-Bandwidth Hybrid Probing
-
-HYBRIDIZATION is a specialized mechanism designed for low-bandwidth environments.
-
-According to current design specifications, it is triggered when bandwidth falls below 30 Mbps.
-
-It integrates probing strategies from various algorithms to improve both available bandwidth discovery and rate adjustment in low-bandwidth scenarios.
-
-### 3.4 CHIMERA: Parallel Candidate-Algorithm Probing
-
-CHIMERA is one of the most unique special mechanisms in ABRCC 3.3.
-
-It utilizes a parallel approach, where multiple candidate algorithms perform probes simultaneously; the system then compares the results from these candidates to make a selection.
-
-Unlike traditional control schemes that rely on a single, fixed algorithm to generate probing results, CHIMERA leverages multiple candidates. CHIMERA also incorporates a multi-parameter multiplier-based growth design, with settings such as 30x and 4x multipliers discussed.
-
-These multipliers are part of the internal parameter design and should not be interpreted as a guarantee that the final TCP transmission rate will increase by the exact same factor.
-
-## 4. Bandwidth and RTT Management
-
-In addition to its three primary operating modes and four specialized mechanisms, ABRCC inherits several control designs established in previous versions.
-
-These include:
-
-- Global fair-share management
-- Bandwidth maximum filtering
-- Minimum RTT refresh
-- PROBE_RTT-lite
-- High-jitter handling
-- Time-based backoff
-- Dynamic compensation scaling
-- Congestion capacity learning
-- Dynamic minimum rate
-
-These mechanisms address bandwidth estimation, RTT management, congestion recovery, and transmission rate control.
-
-They are designed to mitigate the destabilizing effects that fluctuations in network conditions can have on transmission behavior.
-
-## 5. Design Significance of the Multi-Mode Architecture
-
-The core concept behind ABRCC 3.3 is to organize various control strategies within a unified algorithmic framework.
-
-The three primary operating modes handle the main control responsibilities, while the four specialized mechanisms provide additional probing and control capabilities tailored to specific conditions.
-
-This architecture is characterized by the following:
-
-1. Multi-mode: It is not restricted to a single operating mode.
-2. Multi-algorithm: It seeks to integrate the strengths of different congestion control algorithms.
-3. Adaptive probing: It employs different probing strategies based on varying network conditions.
-4. Parallel candidates: CHIMERA introduces a framework for comparing multiple algorithmic candidates in parallel.
-5. Dynamic control: It adjusts transmission behavior by incorporating bandwidth, RTT, and congestion feedback.
-
-## 6. Future Research Directions
-
-The ongoing development of ABRCC involves not only the addition of new algorithmic mechanisms but also more rigorous performance validation.
-
-Areas worthy of further research include:
-
-- Fairness comparisons with Linux CUBIC, BBR, and Reno.
-- Throughput performance under varying RTT conditions.
-- Stability in environments with random or bursty packet loss.
-- Convergence speed during dynamic bandwidth fluctuations.
-- Fairness in scenarios involving competition among multiple connections. - Performance under various queue management mechanisms.
-- The balance between probing for capacity and slowing down during congestion.
-
-## 7. Project Summary
-
-ABRCC 3.3 is an experimental Linux TCP congestion control project that employs a multi-mode approach, a combination of multiple algorithms, and specialized probing mechanisms.
-
-Its core design consists of three primary operating modes and four specialized mechanisms:
-
-**Primary Operating Modes:**
-- MODE_CTCP
-- MODE_BAND
-- MODE_HYBRID
-
-**Specialized Mechanisms:**
 - GECKO
 - SALAMANDER
 - HYBRIDIZATION
 - CHIMERA
 
-ABRCC aims to explore a more flexible TCP congestion control architecture, allowing different control strategies to be applied effectively based on the specific network environment.
+These are not separate primary operating modes, but rather specialized probing or control mechanisms.
 
-The project requires further validation—through the release of source code, reproducible testing, and comparative experiments across diverse network environments—to confirm the efficacy of its design.
+### 4.1 GECKO: Startup Burst Probing Mechanism
 
-**ABRCC — Adaptive Bandwidth and RTT Congestion Control.**
+Default state: Enabled.
+
+Trigger conditions:
+
+- Completion of TCP connection initialization.
+- Entry into the startup phase following connection establishment.
+
+Default duration: 5 seconds.
+
+Operational logic:
+
+1. Utilizes the full fair-share budget allocated to the connection during the startup phase.
+2. Temporarily disregards packet loss and standard congestion control feedback.
+3. Records the peak delivery rate observed during the startup phase.
+4. Transitions back to standard CTCP control once the startup phase concludes.
+
+Rate after the startup phase:
+
+`rate = max(peak / 2, 8 Mbps)`
+
+Subsequently, the rate is subject to minimum rate constraints and the fair-share upper limit.
+
+Special case: If the startup phase fails to reach 8 Mbps, the rate will not be reduced below the peak delivery rate actually achieved.
+
+GECKO also clears the packet-loss and queue history accumulated during the startup phase, preventing the initial burst from skewing subsequent control states.
+
+### 4.2 SALAMANDER: Stepped Bandwidth-Surge Mechanism
+
+Default state: Enabled (requires `sal_on=1`). SALAMANDER determines the target for the next probing phase based on the best delivery rate observed during the connection's history.
+
+Default Steps:
+
+| Existing Effective Bandwidth | Next Target |
+|---|---:|
+| Below 30 Mbps | Disable step-based probing; use HYBRIDIZATION |
+| 30–50 Mbps | 50 Mbps |
+| 50–100 Mbps | 100 Mbps |
+| 100–150 Mbps | 150 Mbps |
+| 150–200 Mbps | 200 Mbps |
+| Target Reached | Step completed |
+
+Conditions for Initiating a Probe:
+
+- Currently in the `ST_CTCP` state.
+- Current primary mode is `MODE_CTCP`.
+- RTT is within an acceptable range.
+- The connection is active.
+- Not currently in `PROBE_RTT`.
+- No extreme congestion is present.
+- There is still sufficient room for rate growth.
+- The current target has not been reached for at least 10 minutes.
+- An interval of 6–7 minutes has elapsed since the last probe.
+
+Default Probing Parameters:
+
+| Parameter | Default Value |
+|---|---:|
+| `sal_idle_s` | 600 seconds |
+| `sal_gap_min_s` | 360 seconds |
+| `sal_gap_max_s` | 420 seconds |
+| `sal_dur_s` | 30 seconds |
+| `sal_ramp_s` | 6 seconds |
+| `sal_tries` | 3 attempts |
+| `sal_reach_pct` | 95% |
+
+Operational Mechanism:
+
+- Employs a linear growth approach to transition from the pre-probe rate toward the target rate.
+- Incorporates candidate rates derived from CTCP, CUBIC, Westwood+, and BBR methodologies.
+- Candidate growth is constrained by a maximum 2x increase per round and the target bandwidth.
+
+Failure Conditions:
+
+1. The smoothed packet loss rate increases by at least 2 percentage points compared to the rate at the start of the probe. 2. Extreme congestion occurs.
+3. The state transitions to HIGH.
+4. Queue delay reaches a minimum of 10 ms or 50% of the base RTT.
+5. Transmission overload occurs.
+
+These anomalies must persist for approximately two RTTs—and at least 200 ms—before a probe is deemed a failure.
+
+Failure Handling:
+
+- Revert to the rate used prior to the start of the probe.
+- Limit the rate to the vicinity of the previous probe rate.
+- Initiate a random cooldown period of 150–210 seconds.
+- Resume normal control.
+
+Success Condition:
+
+The delivery rate reaches 95% of the target and remains at that level for at least 1 second.
+
+SALAMANDER retains up to three probe records. Each record includes the start time, duration, base rate, target rate, peak rate, packet loss rate, and queue delay.
+
+### 4.3 HYBRIDIZATION: Low-Bandwidth Hybrid Probing Mechanism
+
+Default State: Enabled via `sal_on`.
+
+Trigger Conditions:
+
+- The best historical delivery rate is below 30 Mbps.
+- Currently in the `ST_CTCP` state.
+- The connection is actively transmitting data.
+- Not currently in `PROBE_RTT`.
+- No extreme congestion is present.
+- Sufficient headroom exists for bandwidth growth.
+- At least 6 minutes have elapsed since the last probe.
+
+Default Parameters:
+
+| Parameter | Default Value |
+|---|---:|
+| `sal_off_mbps` | 30 Mbps |
+| `sal_hyb_gap_s` | 360 seconds |
+| `sal_hyb_s` | 20 seconds |
+| `sal_hyb_tries` | 3 attempts |
+| Maximum Probe Target | 50 Mbps |
+
+Operational Logic:
+
+1. Use a growth step four times larger than that of CTCP.
+2. Suspend standard packet-loss-based backoff.
+3. Incorporate a CUBIC-based candidate.
+4. Incorporate a Westwood+-based bandwidth estimation candidate.
+5. Incorporate a BBR-style bandwidth gain candidate.
+6. Compare the candidate rates and select the highest value. Unlike SALAMANDER, HYBRIDIZATION does not require the current primary mode to be MODE_CTCP, nor does it mandate that the RTT be within a normal range.
+
+It is primarily designed for hybrid probing under low-bandwidth conditions.
+
+Failure conditions:
+
+- Severe queuing delay.
+- Transmission overload.
+- Extreme congestion.
+
+Upon failure, the system reverts to the rate used prior to the probe. Unlike SALAMANDER, it does not trigger a failure solely due to an increase in packet loss, nor does it employ the same 150–210 second "cooldown" period following a failure.
+
+Each probe lasts a maximum of approximately 20 seconds, with up to three attempts permitted; each attempt—regardless of whether it succeeds or fails—counts toward this limit.
+
+### 4.4 CHIMERA: Multi-Algorithm Parallel Candidate Mechanism
+
+CHIMERA is an independent, optional mechanism within ABRCC.
+
+**Disabled by default: `chimera=0`.**
+
+To enable:
+
+`chimera=1`
+
+Trigger conditions:
+
+- Peak packet loss rate reaches 10%.
+- The Veno random packet loss indicator reaches 60%.
+- No evidence of congestion.
+- No state of extreme congestion.
+- These conditions persist for a default duration of 16 control rounds.
+
+It incorporates four candidates:
+
+- CTCP
+- CUBIC
+- Westwood+
+- BBR-style bandwidth gain
+
+The algorithm selects the highest rate among these candidates.
+
+A specific eight-round cycle is applied:
+
+| Round | Action |
+|---|---|
+| Round 0 | BBR-style probe, gain = 1.25 |
+| Round 1 | BBR DRAIN, capped at 0.75x bandwidth |
+| Other Rounds | Standard candidate "cruising," gain = 1.0 |
+
+During the probing phase, the growth of any candidate is further limited to a maximum of 2x per round.
+
+If an occurrence...
